@@ -3,6 +3,8 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
+from pathlib import Path
 import threading
 import time
 import urllib.request
@@ -12,6 +14,18 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 SECRET = hmac.new(TOKEN.encode(), b'adprint-webhook-v1', hashlib.sha256).hexdigest() if TOKEN else ''
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', '').rstrip('/')
 READY = False
+VIDEO_PATH = Path(__file__).with_name('1678768941270154082.mp4')
+STICKER_PROMO = """ជម្រាបសួរបង! 🎉🎉 នេះជាតម្លៃប្រម៉ូសិនស្ទីកគ័រក្រដាស មានអ៊ុត៖
+
+✅ មិនហើរពណ៌ ស្អិតល្អ បោះពុម្ពច្បាស់ស្អាត
+
+• 1m² = $6.50
+• 10m² = $55 ថែមជូន 3m²
+👉 សរុបបាន 13m² — គិតជាមធ្យមប្រហែល $4.23/m²
+
+បងចង់បានទំហំប៉ុន្មាន និងចំនួនប៉ុន្មានដែរ?
+សូមផ្ញើរូបគំរូ និងថ្ងៃត្រូវការទៅផ្នែកលក់៖
+https://t.me/ADPrint168"""
 MENU = {'keyboard': [['ស្ទីកគ័រ', 'ប្រអប់'], ['ថង់ក្រដាស', 'សៀវភៅ'], ['ស្នើសុំតម្លៃ', 'ទាក់ទងផ្នែកលក់']], 'resize_keyboard': True}
 CONTACT = 'សូមទាក់ទងផ្នែកលក់តាម https://t.me/ADPrint168 ដើម្បីផ្ញើព័ត៌មាន និងបញ្ជាក់ការបញ្ជាទិញ។'
 QUOTE = 'សម្រាប់ស្នើសុំតម្លៃ សូមរៀបចំព័ត៌មាន៖\n1. ប្រភេទផលិតផល\n2. ទំហំ (សង់ទីម៉ែត្រ)\n3. ចំនួន\n4. សម្ភារៈ និងការកែច្នៃ\n5. ថ្ងៃត្រូវការទទួល\n6. រូបគំរូ ឬឯកសាររចនា\n\n' + CONTACT + '\nតម្លៃ និងថ្ងៃប្រគល់ត្រូវបញ្ជាក់ដោយផ្នែកលក់។'
@@ -27,6 +41,8 @@ def reply_for(message):
     products = [('ស្ទីកគ័រ', ('ស្ទីក', 'sticker')), ('ប្រអប់', ('ប្រអប់', 'box')), ('ថង់ក្រដាស', ('ថង់', 'bag')), ('សៀវភៅ', ('សៀវភៅ', 'book'))]
     for name, keywords in products:
         if any(word in text for word in keywords):
+            if name == 'ស្ទីកគ័រ':
+                return STICKER_PROMO
             return 'បងចាប់អារម្មណ៍បោះពុម្ព' + name + '។\n\n' + QUOTE
     if any(word in text for word in ('តម្លៃ', 'price', 'quote')) or text == '/quote':
         return QUOTE
@@ -78,6 +94,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == '/promo.mp4' and VIDEO_PATH.is_file():
+            self.send_response(200)
+            self.send_header('Content-Type', 'video/mp4')
+            self.send_header('Content-Length', str(VIDEO_PATH.stat().st_size))
+            self.end_headers()
+            with VIDEO_PATH.open('rb') as video:
+                shutil.copyfileobj(video, self.wfile)
+            return
         if self.path not in ('/', '/health'):
             return self.respond(404, {'error': 'not_found'})
         self.respond(200, {'service': 'ADPrint Telegram Bot', 'status': 'ready' if READY else 'setup_required'})
@@ -101,7 +125,11 @@ class Handler(BaseHTTPRequestHandler):
             chat = message.get('chat', {})
             if chat.get('type') != 'private' or not isinstance(chat.get('id'), int) or message.get('from', {}).get('is_bot'):
                 return self.respond(200, {'ok': True})
-            self.respond(200, {'method': 'sendMessage', 'chat_id': chat['id'], 'text': reply_for(message), 'reply_markup': MENU})
+            reply = reply_for(message)
+            if reply == STICKER_PROMO and VIDEO_PATH.is_file() and BASE_URL.startswith('https://'):
+                self.respond(200, {'method': 'sendVideo', 'chat_id': chat['id'], 'video': BASE_URL + '/promo.mp4', 'caption': reply, 'reply_markup': MENU})
+            else:
+                self.respond(200, {'method': 'sendMessage', 'chat_id': chat['id'], 'text': reply, 'reply_markup': MENU})
         except (ValueError, TypeError, AttributeError):
             self.respond(400, {'error': 'invalid_update'})
 
@@ -110,3 +138,4 @@ if __name__ == '__main__':
     threading.Thread(target=register, daemon=True).start()
     print('ADPrint web service started.', flush=True)
     server.serve_forever()
+
