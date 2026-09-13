@@ -20,11 +20,13 @@ STICKER_PROMO = """ជម្រាបសួរបង!
 ✅ មិនហើរពណ៌ ស្អិតល្អ បោះពុម្ពច្បាស់ស្អាត
 • 1m² = $6.50
 • 10m² = $55 ថែមជូន 3m²
-👉 សរុបបាន 13m² = $4.23/m²
-បងចង់បានទំហំប៉ុន្មាន និងចំនួនប៉ុន្មានដែរ?
-
-សូមផ្ញើរូបគំរូ និងថ្ងៃត្រូវការទៅផ្នែកលក់៖
+👉 សរុបបាន 13m² = $4.23/m²"""
+STICKER_FOLLOWUP = """បងចង់បានទំហំប៉ុន្មាន និងចំនួនប៉ុន្មានដែរ?"""
+STICKER_CONTACT = """សូមផ្ញើរូបគំរូ និងថ្ងៃត្រូវការទៅផ្នែកលក់៖
 https://t.me/ADPrint168"""
+SEND_LOCK = threading.Lock()
+SEND_PROGRESS = {}  # Bounded retry tracking; resets on restart.
+VIDEO_FILE_ID = None
 MENU = {'keyboard': [['ស្ទីកគ័រ', 'ប្រអប់'], ['ថង់ក្រដាស', 'សៀវភៅ'], ['ស្នើសុំតម្លៃ', 'ទាក់ទងផ្នែកលក់']], 'resize_keyboard': True}
 CONTACT = 'សូមទាក់ទងផ្នែកលក់តាម https://t.me/ADPrint168 ដើម្បីផ្ញើព័ត៌មាន និងបញ្ជាក់ការបញ្ជាទិញ។'
 QUOTE = 'សម្រាប់ស្នើសុំតម្លៃ សូមរៀបចំព័ត៌មាន៖\n1. ប្រភេទផលិតផល\n2. ទំហំ (សង់ទីម៉ែត្រ)\n3. ចំនួន\n4. សម្ភារៈ និងការកែច្នៃ\n5. ថ្ងៃត្រូវការទទួល\n6. រូបគំរូ ឬឯកសាររចនា\n\n' + CONTACT + '\nតម្លៃ និងថ្ងៃប្រគល់ត្រូវបញ្ជាក់ដោយផ្នែកលក់។'
@@ -49,11 +51,36 @@ def reply_for(message):
 
 def telegram(method, payload):
     request = urllib.request.Request('https://api.telegram.org/bot' + TOKEN + '/' + method, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=50) as response:
         result = json.load(response)
     if not result.get('ok'):
         raise RuntimeError('Telegram API request failed')
     return result['result']
+
+def send_sticker(chat_id, update_id):
+    global VIDEO_FILE_ID
+    # Track successful steps so ordinary webhook retries do not repeat them.
+    with SEND_LOCK:
+        if update_id not in SEND_PROGRESS:
+            if len(SEND_PROGRESS) >= 1000:
+                SEND_PROGRESS.pop(next(iter(SEND_PROGRESS)))
+            SEND_PROGRESS[update_id] = 0
+        if SEND_PROGRESS[update_id] == 0:
+            if VIDEO_PATH.is_file() and BASE_URL.startswith('https://'):
+                result = telegram('sendVideo', {'chat_id': chat_id,
+                    'video': VIDEO_FILE_ID or BASE_URL + '/promo.mp4',
+                    'caption': STICKER_PROMO})
+                VIDEO_FILE_ID = result.get('video', {}).get('file_id') or VIDEO_FILE_ID
+            else:
+                telegram('sendMessage', {'chat_id': chat_id, 'text': STICKER_PROMO})
+            SEND_PROGRESS[update_id] = 1
+        if SEND_PROGRESS[update_id] == 1:
+            telegram('sendMessage', {'chat_id': chat_id, 'text': STICKER_FOLLOWUP})
+            SEND_PROGRESS[update_id] = 2
+        if SEND_PROGRESS[update_id] == 2:
+            telegram('sendMessage', {'chat_id': chat_id, 'text': STICKER_CONTACT,
+                'reply_markup': MENU})
+            SEND_PROGRESS[update_id] = 3
 
 def register():
     global READY
@@ -125,8 +152,16 @@ class Handler(BaseHTTPRequestHandler):
             if chat.get('type') != 'private' or not isinstance(chat.get('id'), int) or message.get('from', {}).get('is_bot'):
                 return self.respond(200, {'ok': True})
             reply = reply_for(message)
-            if reply == STICKER_PROMO and VIDEO_PATH.is_file() and BASE_URL.startswith('https://'):
-                self.respond(200, {'method': 'sendVideo', 'chat_id': chat['id'], 'video': BASE_URL + '/promo.mp4', 'caption': reply, 'reply_markup': MENU})
+            if reply == STICKER_PROMO:
+                update_id = update.get('update_id')
+                if not isinstance(update_id, int):
+                    return self.respond(400, {'error': 'invalid_update'})
+                try:
+                    send_sticker(chat['id'], update_id)
+                except Exception:
+                    # Never log API exceptions because URLs contain the token.
+                    return self.respond(503, {'error': 'send_failed_retry'})
+                self.respond(200, {'ok': True})
             else:
                 self.respond(200, {'method': 'sendMessage', 'chat_id': chat['id'], 'text': reply, 'reply_markup': MENU})
         except (ValueError, TypeError, AttributeError):
@@ -137,5 +172,6 @@ if __name__ == '__main__':
     threading.Thread(target=register, daemon=True).start()
     print('ADPrint web service started.', flush=True)
     server.serve_forever()
+
 
 
