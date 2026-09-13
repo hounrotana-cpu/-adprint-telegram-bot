@@ -15,15 +15,14 @@ SECRET = hmac.new(TOKEN.encode(), b'adprint-webhook-v1', hashlib.sha256).hexdige
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', '').rstrip('/')
 READY = False
 VIDEO_PATH = Path(__file__).with_name('1678768941270154082.mp4')
-STICKER_PROMO = """ជម្រាបសួរបង! 🎉🎉 នេះជាតម្លៃប្រម៉ូសិនស្ទីកគ័រក្រដាស មានអ៊ុត៖
-
+STICKER_PROMO = """ជម្រាបសួរបង! 
+🎉🎉 នេះជាតម្លៃប្រម៉ូសិនស្ទីកគ័រក្រដាស មានអ៊ុត៖
 ✅ មិនហើរពណ៌ ស្អិតល្អ បោះពុម្ពច្បាស់ស្អាត
-
 • 1m² = $6.50
 • 10m² = $55 ថែមជូន 3m²
-👉 សរុបបាន 13m² — គិតជាមធ្យមប្រហែល $4.23/m²
-
+👉 សរុបបាន 13m² = $4.23/m²
 បងចង់បានទំហំប៉ុន្មាន និងចំនួនប៉ុន្មានដែរ?
+
 សូមផ្ញើរូបគំរូ និងថ្ងៃត្រូវការទៅផ្នែកលក់៖
 https://t.me/ADPrint168"""
 MENU = {'keyboard': [['ស្ទីកគ័រ', 'ប្រអប់'], ['ថង់ក្រដាស', 'សៀវភៅ'], ['ស្នើសុំតម្លៃ', 'ទាក់ទងផ្នែកលក់']], 'resize_keyboard': True}
@@ -138,4 +137,5 @@ if __name__ == '__main__':
     threading.Thread(target=register, daemon=True).start()
     print('ADPrint web service started.', flush=True)
     server.serve_forever()
+
 
