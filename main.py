@@ -90,12 +90,12 @@ def register():
     for attempt in range(8):
         try:
             identity = telegram('getMe', {})
-            if identity.get('username', '').lower() != 'adprint168bot':
+            if identity.get('username', '').lower() != 'adprintadmin_bot':
                 print('Setup stopped: token belongs to a different bot.', flush=True)
                 return
             telegram('setWebhook', {'url': BASE_URL + '/telegram', 'secret_token': SECRET, 'allowed_updates': ['message'], 'max_connections': 4, 'drop_pending_updates': False})
             READY = True
-            print('ADPrint168Bot webhook registered.', flush=True)
+            print('ADPrintAdmin_bot webhook registered.', flush=True)
             return
         except Exception:
             # Never log exceptions: Telegram URLs contain the token.
@@ -172,6 +172,7 @@ if __name__ == '__main__':
     threading.Thread(target=register, daemon=True).start()
     print('ADPrint web service started.', flush=True)
     server.serve_forever()
+
 
 
 
