@@ -1,4 +1,5 @@
 """ADPrint Khmer menu bot. Python standard library only; no customer storage."""
+import secrets
 import hashlib
 import hmac
 import json
@@ -14,6 +15,29 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 SECRET = hmac.new(TOKEN.encode(), b'adprint-webhook-v1', hashlib.sha256).hexdigest() if TOKEN else ''
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', '').rstrip('/')
 READY = False
+BOT_ID = None
+BRIDGE_KEY = hmac.new(TOKEN.encode(), b'adprint-broadcast-bridge-v1', hashlib.sha256).hexdigest() if TOKEN else ''
+BRIDGE_GENERATION = secrets.token_hex(16)
+SUBSCRIBERS = {}
+SUBSCRIBER_LOCK = threading.Lock()
+
+def subscription_update(message, update_id):
+    text = str(message.get('text', '')).strip().split()
+    command = text[0].split('@')[0].lower() if text else ''
+    if command not in ('/start', '/stop'):
+        return command
+    chat = message['chat']
+    chat_id = str(chat['id'])
+    with SUBSCRIBER_LOCK:
+        old = SUBSCRIBERS.get(chat_id)
+        if old and update_id <= old['updateId']:
+            return command
+        if not old and len(SUBSCRIBERS) >= 10000:
+            raise RuntimeError('subscriber_capacity')
+        SUBSCRIBERS[chat_id] = {'chatId': chat_id, 'name': ' '.join(filter(None, [chat.get('first_name'), chat.get('last_name')])) or chat_id,
+            'username': chat.get('username', ''), 'active': command == '/start', 'updateId': update_id}
+    return command
+
 VIDEO_PATH = Path(__file__).with_name('1678768941270154082.mp4')
 STICKER_PROMO = """ជម្រាបសួរបង! 
 🎉🎉 នេះជាតម្លៃប្រម៉ូសិនស្ទីកគ័រក្រដាស មានអ៊ុត៖
@@ -83,7 +107,7 @@ def send_sticker(chat_id, update_id):
             SEND_PROGRESS[update_id] = 3
 
 def register():
-    global READY
+    global READY, BOT_ID
     if not TOKEN or not BASE_URL.startswith('https://'):
         print('Setup pending: set TELEGRAM_BOT_TOKEN and a public HTTPS URL.', flush=True)
         return
@@ -93,6 +117,7 @@ def register():
             if identity.get('username', '').lower() != 'adprintadmin_bot':
                 print('Setup stopped: token belongs to a different bot.', flush=True)
                 return
+            BOT_ID = identity['id']
             telegram('setWebhook', {'url': BASE_URL + '/telegram', 'secret_token': SECRET, 'allowed_updates': ['message'], 'max_connections': 4, 'drop_pending_updates': False})
             READY = True
             print('ADPrintAdmin_bot webhook registered.', flush=True)
@@ -120,6 +145,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == '/broadcast/contacts':
+            supplied = self.headers.get('Authorization', '')
+            if not BRIDGE_KEY or not hmac.compare_digest(supplied.encode(), ('Bearer ' + BRIDGE_KEY).encode()):
+                return self.respond(403, {'error': 'forbidden'})
+            if not READY or not BOT_ID:
+                return self.respond(503, {'error': 'not_ready'})
+            with SUBSCRIBER_LOCK:
+                contacts = list(SUBSCRIBERS.values())
+            return self.respond(200, {'botId': BOT_ID, 'generation': BRIDGE_GENERATION, 'contacts': contacts})
         if self.path == '/promo.mp4' and VIDEO_PATH.is_file():
             self.send_response(200)
             self.send_header('Content-Type', 'video/mp4')
@@ -151,6 +185,15 @@ class Handler(BaseHTTPRequestHandler):
             chat = message.get('chat', {})
             if chat.get('type') != 'private' or not isinstance(chat.get('id'), int) or message.get('from', {}).get('is_bot'):
                 return self.respond(200, {'ok': True})
+            update_id = update.get('update_id')
+            if not isinstance(update_id, int):
+                return self.respond(400, {'error': 'invalid_update'})
+            try:
+                command = subscription_update(message, update_id)
+            except RuntimeError:
+                return self.respond(503, {'error': 'subscriber_capacity'})
+            if command == '/stop':
+                return self.respond(200, {'ok': True})
             reply = reply_for(message)
             if reply == STICKER_PROMO:
                 update_id = update.get('update_id')
@@ -172,6 +215,7 @@ if __name__ == '__main__':
     threading.Thread(target=register, daemon=True).start()
     print('ADPrint web service started.', flush=True)
     server.serve_forever()
+
 
 
 
