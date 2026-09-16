@@ -60,7 +60,7 @@ def reply_for(message):
     if message.get('photo') or message.get('document'):
         return 'Bot នេះមិនទាន់អាចពិនិត្យឯកសារ ឬបញ្ជូនទៅផ្នែកលក់បានទេ។ ' + CONTACT
     if text.startswith('/start') or text in ('hi', 'hello', 'សួស្តី', 'ជម្រាបសួរ', '/help'):
-        return 'សួស្តី! សូមស្វាគមន៍មកកាន់រោងពុម្ព ADPrint។ ខ្ញុំជា Bot ឆ្លើយតបស្វ័យប្រវត្តិ។ សូមជ្រើសផលិតផលខាងក្រោម។'
+        return 'សួស្តី! សូមស្វាគមន៍មកកាន់រោងពុម្ព ADPrint។ សូមជ្រើសផលិតផលខាងក្រោម។'
     if text == 'ទាក់ទងផ្នែកលក់' or text == '/contact':
         return CONTACT
     products = [('ស្ទីកគ័រ', ('ស្ទីក', 'sticker')), ('ប្រអប់', ('ប្រអប់', 'box')), ('ថង់ក្រដាស', ('ថង់', 'bag')), ('សៀវភៅ', ('សៀវភៅ', 'book'))]
@@ -215,6 +215,7 @@ if __name__ == '__main__':
     threading.Thread(target=register, daemon=True).start()
     print('ADPrint web service started.', flush=True)
     server.serve_forever()
+
 
 
 
