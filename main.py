@@ -1,5 +1,10 @@
-"""ADPrint Khmer menu bot. Python standard library only; no customer storage."""
+"""ADPrint Khmer menu bot. Python standard library only; durable Telegram subscription storage."""
+# Deployment: paid Render service, one instance, Persistent Disk at /var/data (1 GB).
+# Install the disk before replacing main.py. No additional Python packages required.
+# Existing memory-only contacts cannot be reconstructed safely; ask them to Start once
+# after migration. Future starts and stops survive restarts and deployments.
 import secrets
+import sqlite3
 import hashlib
 import hmac
 import json
@@ -17,25 +22,77 @@ BASE_URL = os.getenv('RENDER_EXTERNAL_URL', '').rstrip('/')
 READY = False
 BOT_ID = None
 BRIDGE_KEY = hmac.new(TOKEN.encode(), b'adprint-broadcast-bridge-v1', hashlib.sha256).hexdigest() if TOKEN else ''
-BRIDGE_GENERATION = secrets.token_hex(16)
-SUBSCRIBERS = {}
+# On Render, attach a Persistent Disk at /var/data before deploying.
+# Never silently fall back to memory or an ephemeral source-directory database.
+DATA_DIRECTORY = Path(os.getenv('ADPRINT_DATA_DIR', '/var/data'))
 SUBSCRIBER_LOCK = threading.Lock()
+
+def database():
+    if not DATA_DIRECTORY.is_absolute():
+        raise RuntimeError('absolute_data_directory_required')
+    if os.getenv('RENDER') and not os.path.ismount(DATA_DIRECTORY):
+        raise RuntimeError('persistent_disk_required')
+    DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(DATA_DIRECTORY / 'telegram.sqlite3'), timeout=15)
+    connection.row_factory = sqlite3.Row
+    connection.execute('PRAGMA synchronous=FULL')
+    return connection
+
+def init_storage():
+    with SUBSCRIBER_LOCK:
+        connection = database()
+        try:
+            with connection:
+                connection.execute('CREATE TABLE IF NOT EXISTS bridge_metadata (bot_id INTEGER PRIMARY KEY, generation TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0)')
+                connection.execute('CREATE TABLE IF NOT EXISTS subscribers (bot_id INTEGER NOT NULL, chat_id TEXT NOT NULL, name TEXT NOT NULL, username TEXT NOT NULL, active INTEGER NOT NULL, event_date INTEGER NOT NULL, event_id INTEGER NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(bot_id,chat_id))')
+                connection.execute('INSERT OR IGNORE INTO bridge_metadata(bot_id,generation) VALUES (?,?)', (BOT_ID, secrets.token_hex(16)))
+        finally:
+            connection.close()
+
+def contacts_snapshot():
+    with SUBSCRIBER_LOCK:
+        connection = database()
+        try:
+            with connection:
+                connection.execute('BEGIN')
+                metadata = connection.execute('SELECT generation FROM bridge_metadata WHERE bot_id=?', (BOT_ID,)).fetchone()
+                rows = connection.execute('SELECT * FROM subscribers WHERE bot_id=? ORDER BY chat_id', (BOT_ID,)).fetchall()
+                if not metadata:
+                    raise RuntimeError('storage_not_initialized')
+                return metadata['generation'], [{'chatId': r['chat_id'], 'name': r['name'], 'username': r['username'], 'active': bool(r['active']), 'updateId': r['revision']} for r in rows]
+        finally:
+            connection.close()
 
 def subscription_update(message, update_id):
     text = str(message.get('text', '')).strip().split()
     command = text[0].split('@')[0].lower() if text else ''
     if command not in ('/start', '/stop'):
         return command
+    if not READY or not BOT_ID:
+        raise RuntimeError('storage_not_ready')
     chat = message['chat']
     chat_id = str(chat['id'])
+    event_date = message.get('date')
+    if not isinstance(event_date, int) or isinstance(event_date, bool) or event_date < 0:
+        raise ValueError('invalid_event_date')
     with SUBSCRIBER_LOCK:
-        old = SUBSCRIBERS.get(chat_id)
-        if old and update_id <= old['updateId']:
-            return command
-        if not old and len(SUBSCRIBERS) >= 10000:
-            raise RuntimeError('subscriber_capacity')
-        SUBSCRIBERS[chat_id] = {'chatId': chat_id, 'name': ' '.join(filter(None, [chat.get('first_name'), chat.get('last_name')])) or chat_id,
-            'username': chat.get('username', ''), 'active': command == '/start', 'updateId': update_id}
+        connection = database()
+        try:
+            with connection:
+                connection.execute('BEGIN IMMEDIATE')
+                old = connection.execute('SELECT event_date,event_id FROM subscribers WHERE bot_id=? AND chat_id=?', (BOT_ID,chat_id)).fetchone()
+                # Telegram can restart update_id numbering after a long idle period.
+                if old and (event_date,update_id) <= (old['event_date'],old['event_id']):
+                    return command
+                if not old and connection.execute('SELECT count(*) FROM subscribers WHERE bot_id=?', (BOT_ID,)).fetchone()[0] >= 10000:
+                    raise RuntimeError('subscriber_capacity')
+                connection.execute('UPDATE bridge_metadata SET revision=revision+1 WHERE bot_id=?', (BOT_ID,))
+                revision = connection.execute('SELECT revision FROM bridge_metadata WHERE bot_id=?', (BOT_ID,)).fetchone()[0]
+                name = (' '.join(filter(None,[chat.get('first_name'),chat.get('last_name')])) or chat_id)[:300]
+                username = str(chat.get('username',''))[:100]
+                connection.execute('INSERT INTO subscribers VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(bot_id,chat_id) DO UPDATE SET name=excluded.name,username=excluded.username,active=excluded.active,event_date=excluded.event_date,event_id=excluded.event_id,revision=excluded.revision', (BOT_ID,chat_id,name,username,int(command=='/start'),event_date,update_id,revision))
+        finally:
+            connection.close()
     return command
 
 VIDEO_PATH = Path(__file__).with_name('1678768941270154082.mp4')
@@ -118,6 +175,7 @@ def register():
                 print('Setup stopped: token belongs to a different bot.', flush=True)
                 return
             BOT_ID = identity['id']
+            init_storage()
             telegram('setWebhook', {'url': BASE_URL + '/telegram', 'secret_token': SECRET, 'allowed_updates': ['message'], 'max_connections': 4, 'drop_pending_updates': False})
             READY = True
             print('ADPrintAdmin_bot webhook registered.', flush=True)
@@ -151,9 +209,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(403, {'error': 'forbidden'})
             if not READY or not BOT_ID:
                 return self.respond(503, {'error': 'not_ready'})
-            with SUBSCRIBER_LOCK:
-                contacts = list(SUBSCRIBERS.values())
-            return self.respond(200, {'botId': BOT_ID, 'generation': BRIDGE_GENERATION, 'contacts': contacts})
+            try:
+                generation, contacts = contacts_snapshot()
+            except (RuntimeError, sqlite3.Error, OSError):
+                return self.respond(503, {'error': 'persistent_storage_unavailable'})
+            return self.respond(200, {'botId': BOT_ID, 'generation': generation, 'contacts': contacts, 'storage': 'persistent', 'protocol': 2})
         if self.path == '/promo.mp4' and VIDEO_PATH.is_file():
             self.send_response(200)
             self.send_header('Content-Type', 'video/mp4')
@@ -164,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path not in ('/', '/health'):
             return self.respond(404, {'error': 'not_found'})
-        self.respond(200, {'service': 'ADPrint Telegram Bot', 'status': 'ready' if READY else 'setup_required'})
+        self.respond(200, {'service': 'ADPrint Telegram Bot', 'status': 'ready' if READY else 'setup_required', 'storage': 'persistent' if READY else 'unavailable', 'protocol': 2})
 
     def do_POST(self):
         if self.path != '/telegram':
@@ -190,8 +250,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(400, {'error': 'invalid_update'})
             try:
                 command = subscription_update(message, update_id)
-            except RuntimeError:
-                return self.respond(503, {'error': 'subscriber_capacity'})
+            except (RuntimeError, sqlite3.Error, OSError):
+                return self.respond(503, {'error': 'subscription_not_saved_retry'})
             if command == '/stop':
                 return self.respond(200, {'ok': True})
             reply = reply_for(message)
